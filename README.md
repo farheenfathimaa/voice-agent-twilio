@@ -241,6 +241,123 @@ Set `N8N_WEBHOOK_URL` to an n8n webhook. On call end the agent POSTs:
 
 ---
 
+## Example outputs
+
+All output below is real, captured offline with the mock providers
+(`EMBEDDINGS_PROVIDER=hashing`, `LLM/STT/TTS=mock`, in-process mock CRM).
+
+### `GET /healthz`
+
+```json
+{
+  "status": "ok",
+  "app": "voice-agent-twilio",
+  "environment": "eval-offline",
+  "providers": {
+    "llm": "mock/mock",
+    "stt": "mock",
+    "tts": "mock",
+    "embeddings": "hashing",
+    "vector_backend": "faiss"
+  },
+  "rag_ready": true,
+  "sessions": 0,
+  "transfer_configured": false,
+  "n8n_configured": false
+}
+```
+
+### `POST /agent/sessions`
+
+```json
+{
+  "session_id": "CAtest0487e46e954b47d88eb0",
+  "call_sid": "CAtest0487e46e954b47d88eb0",
+  "caller_id": "+15550001111",
+  "greeting": "Thanks for calling Acme support. How can I help you today?"
+}
+```
+
+### `POST /agent/turn` — order lookup (tool call)
+
+Request:
+
+```json
+{ "text": "Where is order ORD-1001? I want to track it.",
+  "session_id": "CAtest0487e46e954b47d88eb0",
+  "caller_id": "+15550001111", "synthesize": false }
+```
+
+Response (trimmed):
+
+```json
+{
+  "session_id": "CAtest0487e46e954b47d88eb0",
+  "turn": 1,
+  "reply": "Your order ORD-1001 is shipped. with an estimate of 2026-10-17. totaling $49.99.",
+  "confidence": 0.92,
+  "handoff": false,
+  "handoff_reason": "",
+  "contained": true,
+  "tools": [
+    { "name": "lookup_order", "arguments": { "order_id": "ORD-1001" },
+      "ok": true, "latency_ms": 7.3, "error": null }
+  ],
+  "rag_hits": [
+    { "doc_id": "shipping.md#1", "title": "Q: How do I track my order?", "score": 0.7134 },
+    { "doc_id": "orders_and_billing.md#0", "title": "Q: How can I check my order status?", "score": 0.5588 }
+  ],
+  "latency": { "retrieve_ms": 1.96, "llm_ms": 8.06, "tool_ms": 7.30, "tts_ms": 0.0, "total_ms": 10.67 },
+  "audio_b64": null
+}
+```
+
+### `POST /agent/turn` — human handoff
+
+Request: `{ "text": "Please connect me to a human agent.", ... }`
+
+```json
+{
+  "turn": 2,
+  "reply": "Of course. Let me get someone on the line for you.",
+  "confidence": 0.0,
+  "handoff": true,
+  "handoff_reason": "explicit request: \\b(speak|talk|chat|connect|put|transfer)\\b[^.?!]{0,30}\\b(hum",
+  "contained": false,
+  "tools": [],
+  "rag_hits": [],
+  "latency": { "total_ms": 0.44 }
+}
+```
+
+When the call then ends, `/voice/connect` returns the transfer TwiML (shown for a
+session with `TRANSFER_NUMBER=+15559876543` and `TWILIO_PHONE_NUMBER=+15551230000`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="30" callerId="+15551230000"><Number>+15559876543</Number></Dial></Response>
+```
+
+### `GET /metrics/turns` (summary)
+
+```json
+{
+  "summary": {
+    "turns": 2,
+    "avg_total_ms": 5.6,
+    "p50_total_ms": 5.6,
+    "p95_total_ms": 10.2,
+    "avg_retrieve_ms": 1.0,
+    "avg_llm_ms": 4.0,
+    "avg_tool_ms": 3.6,
+    "avg_tts_ms": 0.0,
+    "handoffs": 1,
+    "avg_confidence": 0.46
+  }
+}
+```
+
+---
+
 ## Evaluation
 
 25 scripted calls across FAQ / tools / account / warranty / store / handoff /
@@ -254,15 +371,55 @@ python -m scripts.eval --offline --json eval-report.json
 python -m scripts.eval --offline --scenario order      # single scenario
 ```
 
-Current offline result: **containment 76 %** (exactly the 6 intended handoffs),
-**expectation match 100 %**, **keyword accuracy 100 %**, per-turn server latency
-of a few milliseconds (mock providers).
+`python -m scripts.eval --offline --no-tts`:
+
+```
+====================================================================
+ EVAL REPORT — 25 calls, 30 turns
+====================================================================
+  containment rate        :  76.0%
+  expectation match rate  : 100.0%
+  avg latency / turn      :    1.6 ms
+  p95 latency / turn      :    5.0 ms
+  avg client-side turn    :    3.7 ms
+  stage avg               : stt 0.0ms | retrieve 0.6ms | llm 0.6ms | tool 0.5ms | tts 0.0ms
+  tool-call success       : 3/4 (75.0%)
+  answer keyword accuracy : 23/23 (100.0%)
+  wall time               : 0.2s
+--------------------------------------------------------------------
+  category         calls  contain   match   lat ms
+  account              3   100.0%  100.0%      0.9
+  faq                  7   100.0%  100.0%      1.0
+  handoff              4     0.0%  100.0%      0.7
+  multi-turn           3    66.7%  100.0%      1.7
+  store                3   100.0%  100.0%      1.5
+  tools                3    66.7%  100.0%      5.4
+  warranty             2   100.0%  100.0%      1.0
+====================================================================
+```
+
+The 24 % non-containment is **exactly the 6 scenarios designed to hand off**
+(4 explicit handoff + `unknown-order` + the last turn of `hours-then-human`).
+The single failed tool call is the intentional `ORD-9999` lookup that routes the
+caller to a human — so tool success `3/4` and `expectation match 100 %` are both
+the expected result. Latency stays in the low milliseconds because every provider
+is mocked; swap in Groq/LiteLLM to measure real end-to-end latency.
 
 ## Tests
 
 ```powershell
 python -m pytest          # 93 tests
 python -m ruff check .
+```
+
+```
+$ python -m ruff check .
+All checks passed!
+
+$ python -m pytest
+........................................................................ [ 77%]
+.....................                                                    [100%]
+93 passed in 27.81s
 ```
 
 Coverage: μ-law codec & resampling, TwiML builders, RAG retrieval & tokenization,
