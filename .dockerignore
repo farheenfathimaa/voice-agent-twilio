@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.cache
+.env
+tests
+eval-report*.json
+*.md
+!knowledge/*.md

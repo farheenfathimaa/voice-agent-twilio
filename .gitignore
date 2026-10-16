@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.coverage
+htmlcov/
+eval-report*.json
+.DS_Store
